@@ -1,3 +1,4 @@
+```
 module "three_tier" {
   source  = "john24rel/three-tier/azure"
   private_subnet1_range = "10.0.1.0/24"
@@ -31,3 +32,4 @@ module "three_tier" {
     Quarter     = "3"
   }
 }
+```
