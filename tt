@@ -3,10 +3,6 @@ pipeline {
         label 'ansible' 
     }
 
-    environment {
-        DEFAULT_REFS = 'master,main,'
-    }
-
     stages {
         stage('Checkout Code') {
             steps {
@@ -24,6 +20,17 @@ pipeline {
                     def (owner, repo) = ghRepository.tokenize('/')
                     env.GITHUB_OWNER = owner
                     env.GITHUB_REPO = repo
+
+                    // Fetch the default branch from GitHub API using a secure shell script call
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
+                        def response = sh(script: """
+                            curl -s -H "Authorization: token \$GITHUB_TOKEN" https://api.github.com/repos/${owner}/${repo} | jq -r '.default_branch'
+                        """, returnStdout: true).trim()
+
+                        def defaultBranch = response ?: 'master'  // Fallback to master if default branch is unavailable
+                        echo "Default branch for the repository is: ${defaultBranch}"
+                        env.DEFAULT_BRANCH = defaultBranch
+                    }
 
                     env.GIT_REPO_URL = "git@github.com:${env.GITHUB_OWNER}/${env.GITHUB_REPO}.git"
 
@@ -44,7 +51,8 @@ pipeline {
                         ]]
                     ])
 
-                    sh "git fetch origin ${env.ghprbTargetBranch}"
+                    // Fetch the default branch to compare against
+                    sh "git fetch origin ${env.DEFAULT_BRANCH}"
                 }
             }
         }
@@ -52,8 +60,8 @@ pipeline {
         stage('Get Diff for new_qa.tfvars') {
             steps {
                 sh '''
-                    echo "Generating diff for new_qa.tfvars between ${ghprbTargetBranch} and the pull request commit..."
-                    git diff origin/${ghprbTargetBranch}..HEAD -- new_qa.tfvars > diff.md || true
+                    echo "Generating diff for new_qa.tfvars between ${DEFAULT_BRANCH} and the pull request commit..."
+                    git diff origin/${DEFAULT_BRANCH}..HEAD -- new_qa.tfvars > diff.md || true
 
                     echo "Diff output:"
                     cat diff.md
@@ -143,7 +151,7 @@ pipeline {
                         }
                     }
 
-                    def defaultRefs = env.DEFAULT_REFS.split(',').collect { it.trim() }
+                    def defaultRefs = env.DEFAULT_BRANCH
 
                     sh 'echo "# Git Diffs for Changed Modules" > changelog.md'
 
@@ -175,18 +183,8 @@ pipeline {
                                     if (ref != null) {
                                         return ref
                                     }
-                                    for (def defaultRef in defaultRefs) {
-                                        def refExists = sh(
-                                            script: "git show-ref --verify --quiet refs/heads/${defaultRef} || git show-ref --verify --quiet refs/tags/${defaultRef}",
-                                            returnStatus: true
-                                        ) == 0
-                                        if (refExists) {
-                                            echo "Using default ref '${defaultRef}' in repository ${repoName}"
-                                            return defaultRef
-                                        }
-                                    }
-                                    echo "No default ref found in repository ${repoName}. Skipping."
-                                    return null
+                                    echo "Using default ref '${defaultRefs}' in repository ${repoName}"
+                                    return defaultRefs
                                 }
 
                                 oldRef = determineRef(oldRef)
@@ -253,51 +251,35 @@ pipeline {
             }
             steps {
                 script {
-                    def files = findFiles(glob: 'changelog_*.md')
                     def comments = ''
-                    files.each { file ->
-                        def diffContent = readFile(file.path).replace('`', '\\`')
-                        comments += diffContent + '\n'
+                    // Manually check if changelog files exist and append them
+                    def changelogFiles = ['changelog.md']
+                    changelogFiles.each { file ->
+                        if (fileExists(file)) {
+                            def diffContent = readFile(file).replace('`', '\\`')
+                            comments += diffContent + '\n'
+                        }
                     }
                     comments = comments.trim()
                     writeFile file: 'combined_comments.md', text: comments
                 }
             }
         }
-
-        stage('Display Diffs with ANSI Colors') {
-            when {
-                expression { env.CHANGES_DETECTED == 'true' }
-            }
-            steps {
-                script {
-                    def files = findFiles(glob: 'changelog_*.md')
-                    files.each { file ->
-                        if (file.getLength() > 0) {
-                            echo "Changes detected in ${file.path}:"
-                            def content = readFile(file.path)
-                            echo content
-                        } else {
-                            echo "No changes detected in ${file.path}."
-                        }
-                    }
-                }
-            }
-        }
     }
+
     post {
         always {
             script {
                 if (env.ghprbPullId) {
                     def changesDetected = (env.CHANGES_DETECTED == 'true')
-    
+
                     withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
                         def ghRepository = env.ghprbGhRepository
                         def (owner, repo) = ghRepository.tokenize('/')
                         def prNumber = env.ghprbPullId
-    
+
                         def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
-    
+
                         if (changesDetected) {
                             def diffContent = readFile('combined_comments.md').trim()
                             def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
@@ -312,7 +294,7 @@ pipeline {
                                 """,
                                 returnStdout: true
                             ).trim()
-    
+
                             if (existingCommentUrl) {
                                 writeFile file: 'update_request.json', text: requestBody
                                 sh """
@@ -336,7 +318,7 @@ pipeline {
                 }
             }
         }
-    
+
         failure {
             echo 'Pipeline failed.'
         }
