@@ -285,70 +285,58 @@ pipeline {
             }
         }
     }
-
     post {
         always {
             script {
-                try {
-                    if (env.ghprbPullId) {
-                        def changesDetected = (env.CHANGES_DETECTED == 'true')
-
-                        withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
-                            def ghRepository = env.ghprbGhRepository
-                            def (owner, repo) = ghRepository.tokenize('/')
-                            def prNumber = env.ghprbPullId
-
-                            def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
-
-                            if (changesDetected) {
-                                def diffContent = readFile('combined_comments.md').trim()
-                                def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
-
-                                def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
-
-                                // Fetch existing comments
+                if (env.ghprbPullId) {
+                    def changesDetected = (env.CHANGES_DETECTED == 'true')
+    
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
+                        def ghRepository = env.ghprbGhRepository
+                        def (owner, repo) = ghRepository.tokenize('/')
+                        def prNumber = env.ghprbPullId
+    
+                        def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
+    
+                        if (changesDetected) {
+                            def diffContent = readFile('combined_comments.md').trim()
+                            def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
+                            def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
+                            sh """
+                                curl -s -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" "${apiUrl}" | jq '.' > comments.json
+                            """
+                            def commentsJson = readFile('comments.json').trim()
+                            def existingCommentUrl = sh(
+                                script: """
+                                    jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url' comments.json
+                                """,
+                                returnStdout: true
+                            ).trim()
+    
+                            if (existingCommentUrl) {
+                                writeFile file: 'update_request.json', text: requestBody
                                 sh """
-                                    curl -s -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" "${apiUrl}" -o comments.json
+                                    curl -s -X PATCH -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
                                 """
-                                def commentsJson = sh(script: 'cat comments.json', returnStdout: true).trim()
-
-                                def existingCommentUrl = sh(
-                                    script: "grep -A 2 '\"body\": \"\\[BOT COMMENT\\]' comments.json | grep '\"url\":' | awk -F '\"' '{print \$4}'",
-                                    returnStdout: true
-                                ).trim()
-
-                                if (existingCommentUrl) {
-                                    // Update existing comment
-                                    writeFile file: 'update_request.json', text: requestBody
-                                    sh """
-                                        curl -s -X PATCH -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
-                                    """
-                                    echo "Updated existing comment."
-                                } else {
-                                    // Create new comment
-                                    writeFile file: 'create_request.json', text: requestBody
-                                    sh """
-                                        curl -s -X POST -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                                    """
-                                    echo "Created new comment."
-                                }
-
-                                // Clean up temporary files
-                                sh "rm -f comments.json update_request.json create_request.json"
+                                echo "Updated existing comment."
                             } else {
-                                echo "No source changes detected; no comment will be posted."
+                                writeFile file: 'create_request.json', text: requestBody
+                                sh """
+                                    curl -s -X POST -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
+                                """
+                                echo "Created new comment."
                             }
+                            sh "rm -f comments.json update_request.json create_request.json"
+                        } else {
+                            echo "No source changes detected; no comment will be posted."
                         }
-                    } else {
-                        echo 'Not a PR build; skipping comment update.'
                     }
-                } catch (Exception e) {
-                    echo "An error occurred in the post section: ${e.getMessage()}"
-                    // Optionally, handle the error without failing the pipeline
+                } else {
+                    echo 'Not a PR build; skipping comment update.'
                 }
             }
         }
-
+    
         failure {
             echo 'Pipeline failed.'
         }
