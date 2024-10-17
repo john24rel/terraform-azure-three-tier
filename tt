@@ -267,63 +267,58 @@ pipeline {
         }
     }
 
-post {
-    always {
-        script {
-            if (env.ghprbPullId) {
-                def changesDetected = (env.CHANGES_DETECTED == 'true')
-
-                withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
-                    def ghRepository = env.ghprbGhRepository
-                    def (owner, repo) = ghRepository.tokenize('/')
-                    def prNumber = env.ghprbPullId
-
-                    def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
-
-                    if (changesDetected) {
-                        def diffContent = readFile('combined_comments.md').trim()
-                        def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
-                        def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
-
-                        // Fetch the URL of the existing comment, if any, using curl and jq
-                        def existingCommentUrl = sh (
-                            script: """
-                                curl -s -H "Authorization: token ${GITHUB_TOKEN}" "${apiUrl}" | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url'
-                            """, 
-                            returnStdout: true
-                        ).trim()
-
-                        if (existingCommentUrl) {
-                            // If an existing comment is found, update it
-                            echo "Updating existing comment at: ${existingCommentUrl}"
-                            writeFile file: 'update_request.json', text: requestBody
+    post {
+        always {
+            script {
+                if (env.ghprbPullId) {
+                    def changesDetected = (env.CHANGES_DETECTED == 'true')
+    
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
+                        def ghRepository = env.ghprbGhRepository
+                        def (owner, repo) = ghRepository.tokenize('/')
+                        def prNumber = env.ghprbPullId
+    
+                        def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
+    
+                        if (changesDetected) {
+                            def diffContent = readFile('combined_comments.md').trim()
+                            def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
+                            def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
+    
+                            // Use bash script to handle entire logic
                             sh """
-                                curl -s -X PATCH -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
+                                # Find existing comment URL using curl and jq
+                                existingCommentUrl=\$(curl -s -H "Authorization: token $GITHUB_TOKEN" "${apiUrl}" | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url')
+    
+                                if [ -n "\$existingCommentUrl" ]; then
+                                    # PATCH request to update the existing comment
+                                    echo "Updating existing comment at: \$existingCommentUrl"
+                                    echo '${requestBody}' > update_request.json
+                                    curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @update_request.json "\$existingCommentUrl" -o /dev/null
+                                    echo "Updated existing comment."
+                                else
+                                    # POST request to create a new comment
+                                    echo "No existing comment found. Creating a new comment."
+                                    echo '${requestBody}' > create_request.json
+                                    curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
+                                    echo "Created new comment."
+                                fi
+    
+                                # Clean up
+                                rm -f update_request.json create_request.json
                             """
-                            echo "Updated existing comment."
                         } else {
-                            // If no existing comment is found, create a new one
-                            echo "No existing comment found. Creating a new comment."
-                            writeFile file: 'create_request.json', text: requestBody
-                            sh """
-                                curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                            """
-                            echo "Created new comment."
+                            echo "No source changes detected; no comment will be posted."
                         }
-
-                        // Clean up
-                        sh "rm -f update_request.json create_request.json"
-                    } else {
-                        echo "No source changes detected; no comment will be posted."
                     }
+                } else {
+                    echo 'Not a PR build; skipping comment update.'
                 }
-            } else {
-                echo 'Not a PR build; skipping comment update.'
             }
         }
-    }
-
-    failure {
-        echo 'Pipeline failed.'
+    
+        failure {
+            echo 'Pipeline failed.'
+        }
     }
 }
