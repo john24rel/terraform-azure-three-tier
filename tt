@@ -284,31 +284,34 @@ pipeline {
                             def diffContent = readFile('combined_comments.md').trim()
                             def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
                             def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
+
                             sh """
-                                curl -s -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" "${apiUrl}" | jq '.' > comments.json
+                                curl -s -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" "${apiUrl}" | grep '"url"' | awk -F': ' '{print \$2}' | sed 's/[",]//g' > comments.json
                             """
                             def commentsJson = readFile('comments.json').trim()
                             def existingCommentUrl = sh(
                                 script: """
-                                    jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url' comments.json
+                                    grep '\"[BOT COMMENT]\"' comments.json | awk '{print \$1}'
                                 """,
                                 returnStdout: true
                             ).trim()
 
                             if (existingCommentUrl) {
-                                writeFile file: 'update_request.json', text: requestBody
+                                // DELETE existing comment
                                 sh """
-                                    curl -s -X PATCH -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
+                                    curl -s -X DELETE -H "Authorization: token \$GITHUB_TOKEN" "${existingCommentUrl}" -o /dev/null
                                 """
-                                echo "Updated existing comment."
-                            } else {
-                                writeFile file: 'create_request.json', text: requestBody
-                                sh """
-                                    curl -s -X POST -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                                """
-                                echo "Created new comment."
+                                echo "Deleted existing comment."
                             }
-                            sh "rm -f comments.json update_request.json create_request.json"
+
+                            // POST new comment
+                            writeFile file: 'create_request.json', text: requestBody
+                            sh """
+                                curl -s -X POST -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
+                            """
+                            echo "Posted new comment."
+
+                            sh "rm -f comments.json create_request.json"
                         } else {
                             echo "No source changes detected; no comment will be posted."
                         }
