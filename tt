@@ -272,46 +272,50 @@ pipeline {
             script {
                 if (env.ghprbPullId) {
                     def changesDetected = (env.CHANGES_DETECTED == 'true')
-
+    
                     withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
                         def ghRepository = env.ghprbGhRepository
                         def (owner, repo) = ghRepository.tokenize('/')
                         def prNumber = env.ghprbPullId
-
+    
                         def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
-
+    
                         if (changesDetected) {
                             def diffContent = readFile('combined_comments.md').trim()
                             def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
+    
                             def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
-
+    
+                            // GET request to fetch comments and filter with jq
                             sh """
-                                curl -s -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" "${apiUrl}" | grep '"url"' | awk -F': ' '{print \$2}' | sed 's/[",]//g' > comments.json
+                                curl -s -H "Authorization: token ${GITHUB_TOKEN}" "${apiUrl}" > comments.json
                             """
-                            def commentsJson = readFile('comments.json').trim()
+    
                             def existingCommentUrl = sh(
                                 script: """
-                                    grep '\"[BOT COMMENT]\"' comments.json | awk '{print \$1}'
+                                    cat comments.json | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url'
                                 """,
                                 returnStdout: true
                             ).trim()
-
+    
                             if (existingCommentUrl) {
-                                // DELETE existing comment
+                                // PATCH request to update existing comment
+                                writeFile file: 'update_request.json', text: requestBody
                                 sh """
-                                    curl -s -X DELETE -H "Authorization: token \$GITHUB_TOKEN" "${existingCommentUrl}" -o /dev/null
+                                    curl -s -X PATCH -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
                                 """
-                                echo "Deleted existing comment."
+                                echo "Updated existing comment."
+                            } else {
+                                // POST request to create new comment
+                                writeFile file: 'create_request.json', text: requestBody
+                                sh """
+                                    curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
+                                """
+                                echo "Created new comment."
                             }
-
-                            // POST new comment
-                            writeFile file: 'create_request.json', text: requestBody
-                            sh """
-                                curl -s -X POST -H "Authorization: token \$GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                            """
-                            echo "Posted new comment."
-
-                            sh "rm -f comments.json create_request.json"
+    
+                            // Clean up
+                            sh "rm -f comments.json update_request.json create_request.json"
                         } else {
                             echo "No source changes detected; no comment will be posted."
                         }
@@ -321,7 +325,7 @@ pipeline {
                 }
             }
         }
-
+    
         failure {
             echo 'Pipeline failed.'
         }
