@@ -7,6 +7,20 @@ pipeline {
     }
 
     stages {
+        stage('Setup SSH Keys') {
+            steps {
+                sh '''
+                    mkdir -p ~/.ssh
+                    cat $WORKSPACE/templates/private-key > ~/.ssh/id_rsa
+                    cat $WORKSPACE/templates/public-key > ~/.ssh/id_rsa.pub
+                    chmod 600 ~/.ssh/id_rsa
+                    chmod 644 ~/.ssh/id_rsa.pub
+                    eval $(ssh-agent -s)
+                    ssh-add ~/.ssh/id_rsa
+                    ssh-keyscan github.com >> ~/.ssh/known_hosts
+                '''
+            }
+        }
         stage('Checkout Code') {
             steps {
                 script {
@@ -198,7 +212,7 @@ pipeline {
                                     return
                                 }
 
-                                sh """
+                                sh '''
                                     if [[ "${oldRef}" =~ ^[0-9a-f]{40}$ ]]; then
                                         git fetch origin ${oldRef}:refs/tmp/${oldRef}
                                         oldRef=refs/tmp/${oldRef}
@@ -212,7 +226,7 @@ pipeline {
                                     else
                                         git fetch origin ${newRef}:${newRef} || git fetch origin tag ${newRef} || true
                                     fi
-                                """
+                                '''
 
                                 def refExists = { ref ->
                                     return sh(
@@ -246,10 +260,10 @@ pipeline {
                         } else {
                             def repoUrl = extractRepo(sourceKey.split('\\|')[1])
                             echo "This is a newly added source: ${repoUrl}; no diff"
-                            sh """
+                            sh '''
                                 echo "## New module added: ${repoUrl}" >> changelog.md
                                 echo "This is newly added; no diff." >> changelog.md
-                            """
+                            '''
                         }
                     }
 
@@ -257,10 +271,10 @@ pipeline {
                         if (!newSourceMap.containsKey(sourceKey)) {
                             def (moduleName, repoUrl) = sourceKey.tokenize('|')
                             echo "This source has been removed: ${repoUrl}"
-                            sh """
+                            sh '''
                                 echo "## Module removed: ${repoUrl}" >> changelog.md
                                 echo "Module has been removed; no diff." >> changelog.md
-                            """
+                            '''
                         }
                     }
                 }
@@ -300,32 +314,32 @@ pipeline {
 
                         if (changesDetected) {
                             def diffContent = readFile('combined_comments.md').trim()
-                            def commentBody = "[BOT COMMENT]\n\`\`\`diff\n${diffContent}\n\`\`\`"
+                            def commentBody = """[BOT COMMENT]
 
                             def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
 
-                            sh """
+                            sh '''
                                 curl -s -H "Authorization: token ${GITHUB_TOKEN}" "${apiUrl}" > comments.json
-                            """
+                            '''
 
                             def existingCommentUrl = sh(
-                                script: """
+                                script: '''
                                     cat comments.json | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url'
-                                """,
+                                ''',
                                 returnStdout: true
                             ).trim()
 
                             if (existingCommentUrl) {
                                 writeFile file: 'update_request.json', text: requestBody
-                                sh """
+                                sh '''
                                     curl -s -X PATCH -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
-                                """
+                                '''
                                 echo "Updated existing comment."
                             } else {
                                 writeFile file: 'create_request.json', text: requestBody
-                                sh """
+                                sh '''
                                     curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                                """
+                                '''
                                 echo "Created new comment."
                             }
 
