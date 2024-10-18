@@ -200,15 +200,9 @@ pipeline {
                                 git clone ${gitRepoUrl} ${repoDir}
                             """
                             dir(repoDir) {
-                                def moduleDefaultBranch = ''
-
                                 withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
-                                    def apiResponse = sh(script: """
-                                        curl -s -H "Authorization: token \$GITHUB_TOKEN" https://api.github.com/repos/${repoName}
-                                    """, returnStdout: true).trim()
-
-                                    moduleDefaultBranch = sh(script: """
-                                        echo '${apiResponse}' | jq -r '.default_branch'
+                                    def moduleDefaultBranch= sh(script: """
+                                        curl -s -H "Authorization: token \$GITHUB_TOKEN" https://api.github.com/repos/${repoName} | jq -r '.default_branch'
                                     """, returnStdout: true).trim()
 
                                     moduleDefaultBranch = moduleDefaultBranch ?: 'master'
