@@ -3,6 +3,9 @@ pipeline {
         label 'ansible' 
     }
 
+    environment {
+    }
+
     stages {
         stage('Checkout Code') {
             steps {
@@ -21,13 +24,12 @@ pipeline {
                     env.GITHUB_OWNER = owner
                     env.GITHUB_REPO = repo
 
-                    // Fetch the default branch from GitHub API using a secure shell script call
                     withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
                         def response = sh(script: """
                             curl -s -H "Authorization: token \$GITHUB_TOKEN" https://api.github.com/repos/${owner}/${repo} | jq -r '.default_branch'
                         """, returnStdout: true).trim()
 
-                        def defaultBranch = response ?: 'master'  // Fallback to master if default branch is unavailable
+                        def defaultBranch = response ?: 'master'
                         echo "Default branch for the repository is: ${defaultBranch}"
                         env.DEFAULT_BRANCH = defaultBranch
                     }
@@ -51,7 +53,6 @@ pipeline {
                         ]]
                     ])
 
-                    // Fetch the default branch to compare against
                     sh "git fetch origin ${env.DEFAULT_BRANCH}"
                 }
             }
@@ -134,14 +135,16 @@ pipeline {
                         def sign = line[0]
                         def sourceLine = line.substring(1).trim()
 
+                        def moduleMatch = sourceLine =~ /module\s+"([^"]+)"/
+                        def moduleName = moduleMatch ? moduleMatch[1] : "unknown_module"
+
                         def sourceUrl = extractSourceUrl(sourceLine)
                         if (sourceUrl == null) {
                             echo "Failed to extract source URL from line: ${line}"
                             return
                         }
 
-                        def sourceKey = sourceUrl.contains('?ref=') ? sourceUrl.substring(0, sourceUrl.indexOf('?ref=')) : sourceUrl
-
+                        def sourceKey = "${moduleName}|${sourceUrl.contains('?ref=') ? sourceUrl.substring(0, sourceUrl.indexOf('?ref=')) : sourceUrl}"
                         def ref = extractRef(sourceUrl)
 
                         if (sign == '-') {
@@ -158,7 +161,7 @@ pipeline {
                     newSourceMap.each { sourceKey, newRef ->
                         def oldRef = oldSourceMap[sourceKey]
                         if (oldRef != null) {
-                            def repoUrl = sourceKey
+                            def (moduleName, repoUrl) = sourceKey.tokenize('|')
                             def repoName = extractRepo(repoUrl)
 
                             if (repoName == null) {
@@ -195,12 +198,29 @@ pipeline {
                                     return
                                 }
 
-                                sh "git fetch origin ${oldRef}:${oldRef} || git fetch origin tag ${oldRef} || true"
-                                sh "git fetch origin ${newRef}:${newRef} || git fetch origin tag ${newRef} || true"
+                                sh """
+                                    if [[ "${oldRef}" =~ ^[0-9a-f]{40}$ ]]; then
+                                        git fetch origin ${oldRef}:refs/tmp/${oldRef}
+                                        oldRef=refs/tmp/${oldRef}
+                                    else
+                                        git fetch origin ${oldRef}:${oldRef} || git fetch origin tag ${oldRef} || true
+                                    fi
+
+                                    if [[ "${newRef}" =~ ^[0-9a-f]{40}$ ]]; then
+                                        git fetch origin ${newRef}:refs/tmp/${newRef}
+                                        newRef=refs/tmp/${newRef}
+                                    else
+                                        git fetch origin ${newRef}:${newRef} || git fetch origin tag ${newRef} || true
+                                    fi
+                                """
 
                                 def refExists = { ref ->
                                     return sh(
-                                        script: "git show-ref --verify --quiet refs/heads/${ref} || git show-ref --verify --quiet refs/tags/${ref}",
+                                        script: """
+                                            git show-ref --verify --quiet refs/heads/${ref} || 
+                                            git show-ref --verify --quiet refs/tags/${ref} || 
+                                            git cat-file -e ${ref}^{commit}
+                                        """,
                                         returnStatus: true
                                     ) == 0
                                 }
@@ -214,19 +234,20 @@ pipeline {
                                     return
                                 }
 
-                                def changelogFile = "../changelog_${oldRef}_to_${newRef}.md"
+                                def changelogFile = "../changelog_${moduleName}_${oldRef}_to_${newRef}.md"
                                 sh "git diff ${oldRef} ${newRef} > ${changelogFile}"
 
                                 sh """
-                                    echo "## Changes in module from ${oldRef} to ${newRef}" >> ../changelog.md
+                                    echo "## Changes in module '${moduleName}' from ${oldRef} to ${newRef}" >> ../changelog.md
                                     cat ${changelogFile} >> ../changelog.md
                                 """
                             }
                             sh "rm -rf ${repoDir}"
                         } else {
-                            echo "This is a newly added source: ${sourceKey}; no diff"
+                            def repoUrl = extractRepo(sourceKey.split('\\|')[1])
+                            echo "This is a newly added source: ${repoUrl}; no diff"
                             sh """
-                                echo "## New module added: ${sourceKey}" >> changelog.md
+                                echo "## New module added: ${repoUrl}" >> changelog.md
                                 echo "This is newly added; no diff." >> changelog.md
                             """
                         }
@@ -234,9 +255,10 @@ pipeline {
 
                     oldSourceMap.each { sourceKey, oldRef ->
                         if (!newSourceMap.containsKey(sourceKey)) {
-                            echo "This source has been removed: ${sourceKey}"
+                            def (moduleName, repoUrl) = sourceKey.tokenize('|')
+                            echo "This source has been removed: ${repoUrl}"
                             sh """
-                                echo "## Module removed: ${sourceKey}" >> changelog.md
+                                echo "## Module removed: ${repoUrl}" >> changelog.md
                                 echo "Module has been removed; no diff." >> changelog.md
                             """
                         }
@@ -252,13 +274,9 @@ pipeline {
             steps {
                 script {
                     def comments = ''
-                    // Manually check if changelog files exist and append them
-                    def changelogFiles = ['changelog.md']
-                    changelogFiles.each { file ->
-                        if (fileExists(file)) {
-                            def diffContent = readFile(file).replace('`', '\\`')
-                            comments += diffContent + '\n'
-                        }
+                    if (fileExists('changelog.md')) {
+                        def diffContent = readFile('changelog.md').replace('`', '\\`')
+                        comments += diffContent + '\n'
                     }
                     comments = comments.trim()
                     writeFile file: 'combined_comments.md', text: comments
@@ -272,41 +290,46 @@ pipeline {
             script {
                 if (env.ghprbPullId) {
                     def changesDetected = (env.CHANGES_DETECTED == 'true')
-    
+
                     withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
                         def ghRepository = env.ghprbGhRepository
                         def (owner, repo) = ghRepository.tokenize('/')
                         def prNumber = env.ghprbPullId
-    
+
                         def apiUrl = "https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments"
-    
+
                         if (changesDetected) {
                             def diffContent = readFile('combined_comments.md').trim()
-                            def commentBody = "[BOT COMMENT]\n```diff\n${diffContent}\n```"
+                            def commentBody = "[BOT COMMENT]\n\`\`\`diff\n${diffContent}\n\`\`\`"
+
                             def requestBody = groovy.json.JsonOutput.toJson([body: commentBody])
-    
-                            // Use bash script to handle entire logic
+
                             sh """
-                                # Find existing comment URL using curl and jq
-                                existingCommentUrl=\$(curl -s -H "Authorization: token $GITHUB_TOKEN" "${apiUrl}" | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url')
-    
-                                if [ -n "\$existingCommentUrl" ]; then
-                                    # PATCH request to update the existing comment
-                                    echo "Updating existing comment at: \$existingCommentUrl"
-                                    echo '${requestBody}' > update_request.json
-                                    curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @update_request.json "\$existingCommentUrl" -o /dev/null
-                                    echo "Updated existing comment."
-                                else
-                                    # POST request to create a new comment
-                                    echo "No existing comment found. Creating a new comment."
-                                    echo '${requestBody}' > create_request.json
-                                    curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
-                                    echo "Created new comment."
-                                fi
-    
-                                # Clean up
-                                rm -f update_request.json create_request.json
+                                curl -s -H "Authorization: token ${GITHUB_TOKEN}" "${apiUrl}" > comments.json
                             """
+
+                            def existingCommentUrl = sh(
+                                script: """
+                                    cat comments.json | jq -r '.[] | select(.body | startswith("[BOT COMMENT]")) | .url'
+                                """,
+                                returnStdout: true
+                            ).trim()
+
+                            if (existingCommentUrl) {
+                                writeFile file: 'update_request.json', text: requestBody
+                                sh """
+                                    curl -s -X PATCH -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @update_request.json "${existingCommentUrl}" -o /dev/null
+                                """
+                                echo "Updated existing comment."
+                            } else {
+                                writeFile file: 'create_request.json', text: requestBody
+                                sh """
+                                    curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d @create_request.json "${apiUrl}" -o /dev/null
+                                """
+                                echo "Created new comment."
+                            }
+
+                            sh "rm -f comments.json update_request.json create_request.json"
                         } else {
                             echo "No source changes detected; no comment will be posted."
                         }
@@ -316,7 +339,7 @@ pipeline {
                 }
             }
         }
-    
+
         failure {
             echo 'Pipeline failed.'
         }
