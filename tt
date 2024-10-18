@@ -113,8 +113,7 @@ pipeline {
             steps {
                 script {
                     def sourceChanges = readFile('source_changes.txt').readLines()
-                    def oldSourceMap = [:]
-                    def newSourceMap = [:]
+                    def sourceMap = [:]
 
                     def extractSourceUrl = { String text ->
                         def match = text =~ /source\s*=\s*["'](.*?)["']/
@@ -167,21 +166,26 @@ pipeline {
 
                         def ref = extractRef(sourceUrl)
 
+                        if (!sourceMap.containsKey(sourceKey)) {
+                            sourceMap[sourceKey] = [oldRef: null, newRef: null]
+                        }
+
                         if (sign == '-') {
-                            oldSourceMap[sourceKey] = ref
+                            sourceMap[sourceKey].oldRef = ref
                         } else if (sign == '+') {
-                            newSourceMap[sourceKey] = ref
+                            sourceMap[sourceKey].newRef = ref
                         }
                     }
 
-                    // Debugging: Print oldSourceMap and newSourceMap
-                    echo "Old Source Map: ${oldSourceMap}"
-                    echo "New Source Map: ${newSourceMap}"
+                    // Optional: Debugging - Print the sourceMap
+                    // echo "Source Map: ${sourceMap}"
 
                     sh 'echo "# Git Diffs for Changed Modules" > changelog.md'
 
-                    newSourceMap.each { sourceKey, newRef ->
-                        def oldRef = oldSourceMap[sourceKey]
+                    sourceMap.each { sourceKey, refs ->
+                        def oldRef = refs.oldRef
+                        def newRef = refs.newRef
+
                         if (oldRef != null) {
                             def repoUrl = sourceKey
                             def repoName = extractRepo(repoUrl)
@@ -266,11 +270,9 @@ pipeline {
                                 echo "This is newly added; no diff." >> changelog.md
                             """
                         }
-                    }
 
-                    oldSourceMap.each { sourceKey, oldRef ->
-                        if (!newSourceMap.containsKey(sourceKey)) {
-                            echo "This source has been removed: ${sourceKey}"
+                        if (newRef == null) {
+                            echo "This source has been removed: ${sourceKey}; no diff"
                             sh """
                                 echo "## Module removed: ${sourceKey}" >> changelog.md
                                 echo "Module has been removed; no diff." >> changelog.md
